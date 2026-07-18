@@ -1,11 +1,16 @@
 #![no_std]
 #![no_main]
 
+use core::cell::RefCell;
+
+use bt_hci::cmd::le::LeSetScanParams;
+use bt_hci::controller::ControllerCmdSync;
 use defmt::{info, unwrap, warn};
 use embassy_executor::Spawner;
 use embassy_nrf::mode::Async;
 use embassy_nrf::peripherals::RNG;
 use embassy_nrf::{bind_interrupts, rng};
+use heapless::Deque;
 use nrf_sdc::mpsl::MultiprotocolServiceLayer;
 use nrf_sdc::{self as sdc, mpsl};
 use static_cell::StaticCell;
@@ -39,6 +44,9 @@ fn build_sdc<'d, const N: usize>(
     mem: &'d mut sdc::Mem<N>,
 ) -> Result<nrf_sdc::SoftdeviceController<'d>, nrf_sdc::Error> {
     sdc::Builder::new()?
+        .support_scan()
+        .support_central()
+        .central_count(1)?
         .support_adv()
         .support_peripheral()
         .peripheral_count(1)?
@@ -54,6 +62,8 @@ fn build_sdc<'d, const N: usize>(
 #[embassy_executor::main]
 async fn main(spawner: Spawner) {
     let p = embassy_nrf::init(Default::default());
+
+    // 1. Initialize MPSL
     let mpsl_p =
         mpsl::Peripherals::new(p.RTC0, p.TIMER0, p.TEMP, p.PPI_CH19, p.PPI_CH30, p.PPI_CH31);
     let lfclk_cfg = mpsl::raw::mpsl_clock_lfclk_cfg_t {
@@ -69,22 +79,22 @@ async fn main(spawner: Spawner) {
     )));
     spawner.spawn(unwrap!(mpsl_task(&*mpsl)));
 
+    // 2. Configure SoftDevice Controller
     let sdc_p = sdc::Peripherals::new(
         p.PPI_CH17, p.PPI_CH18, p.PPI_CH20, p.PPI_CH21, p.PPI_CH22, p.PPI_CH23, p.PPI_CH24,
         p.PPI_CH25, p.PPI_CH26, p.PPI_CH27, p.PPI_CH28, p.PPI_CH29,
     );
-
     let mut rng = rng::Rng::new(p.RNG, Irqs);
-
-    let mut sdc_mem = sdc::Mem::<4720>::new();
+    let mut sdc_mem = sdc::Mem::<6080>::new();
     let sdc = unwrap!(build_sdc(sdc_p, &mut rng, mpsl, &mut sdc_mem));
 
+    // 3. Run application
     run(sdc).await;
 }
 
 use embassy_futures::join::join;
 use embassy_futures::select::select;
-use embassy_time::Timer;
+use embassy_time::{Duration, Timer};
 use trouble_host::prelude::*;
 
 /// Max number of connections
@@ -114,7 +124,7 @@ struct BatteryService {
 /// Run the BLE stack.
 pub async fn run<C>(controller: C)
 where
-    C: Controller,
+    C: Controller + ControllerCmdSync<LeSetScanParams>,
 {
     // Using a fixed "random" address can be useful for testing. In real scenarios, one would
     // use e.g. the MAC 6 byte array as the address (how to get that varies by the platform).
@@ -126,8 +136,9 @@ where
     let stack = trouble_host::new(controller, &mut resources)
         .set_random_address(address)
         .build();
-    let runner = stack.runner();
+    let mut runner = stack.runner();
     let mut peripheral = stack.peripheral();
+    let central = stack.central();
 
     info!("Starting advertising and GATT service");
     let server = Server::new_with_config(GapConfig::Peripheral(PeripheralConfig {
@@ -136,25 +147,64 @@ where
     }))
     .unwrap();
 
-    let _ = join(ble_task(runner), async {
-        loop {
-            match advertise("Trouble Example", &mut peripheral, &server).await {
-                Ok(conn) => {
-                    // set up tasks when the connection is established to a central, so they don't run when no one is connected.
-                    let a = gatt_events_task(&server, &conn);
-                    let b = custom_task(&server, &conn, &stack);
-                    // run until any task ends (usually because the connection has been closed),
-                    // then return to advertising state.
-                    select(a, b).await;
+    let printer = Printer {
+        seen: RefCell::new(Deque::new()),
+    };
+    let mut scanner = Scanner::new(central);
+    let mut config = ScanConfig::default();
+    config.active = true;
+    config.phys = PhySet::M1;
+    config.interval = Duration::from_secs(1);
+    config.window = Duration::from_secs(1);
+
+    let _ = join(runner.run_with_handler(&printer), async {
+        join(
+            // Peripheral/advertising task
+            async {
+                loop {
+                    match advertise("Trouble Example", &mut peripheral, &server).await {
+                        Ok(conn) => {
+                            let a = gatt_events_task(&server, &conn);
+                            let b = custom_task(&server, &conn, &stack);
+                            select(a, b).await;
+                        }
+                        Err(e) => {
+                            let e = defmt::Debug2Format(&e);
+                            panic!("[adv] error: {:?}", e);
+                        }
+                    }
                 }
-                Err(e) => {
-                    let e = defmt::Debug2Format(&e);
-                    panic!("[adv] error: {:?}", e);
+            },
+            // Scanning task
+            async {
+                let mut session = scanner.scan(&config).await.unwrap();
+
+                loop {
+                    Timer::after(Duration::from_secs(1)).await;
                 }
-            }
-        }
+            },
+        )
+        .await
     })
     .await;
+}
+struct Printer {
+    seen: RefCell<Deque<BdAddr, 128>>,
+}
+
+impl EventHandler for Printer {
+    fn on_adv_reports(&self, mut it: LeAdvReportsIter<'_>) {
+        let mut seen = self.seen.borrow_mut();
+        while let Some(Ok(report)) = it.next() {
+            if seen.iter().find(|b| b.raw() == report.addr.raw()).is_none() {
+                info!("discovered: {:?}", report.addr);
+                if seen.is_full() {
+                    seen.pop_front();
+                }
+                seen.push_back(report.addr).unwrap();
+            }
+        }
+    }
 }
 
 /// This is a background task that is required to run forever alongside any other BLE tasks.

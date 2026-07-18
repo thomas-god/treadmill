@@ -1331,6 +1331,7 @@ dependencies = [
  "embassy-sync",
  "embassy-time",
  "futures",
+ "heapless",
  "nrf-mpsl",
  "nrf-sdc",
  "panic-probe",

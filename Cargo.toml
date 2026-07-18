@@ -16,6 +16,8 @@ nrf-mpsl = { version = "0.3", default-features = false, features = ["defmt", "cr
 bt-hci = { version = "0.9", default-features = false, features = ["defmt"] }
 trouble-host = { version = "0.7.0", features = ["derive", "scan", "gatt", "defmt", "peripheral"] }
 
+heapless = {version = "0.9.3"}
+
 defmt = "1.0"
 defmt-rtt = "1.0"
 panic-probe = { version = "1.0", features = ["print-defmt"] }

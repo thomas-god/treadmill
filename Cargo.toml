@@ -4,3 +4,30 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
+embassy-executor = { version = "0.10", default-features = false, features = ["platform-cortex-m", "executor-thread", "defmt", "executor-interrupt"] }
+embassy-time = { version = "0.5", default-features = false, features = ["defmt", "defmt-timestamp-uptime"] }
+embassy-nrf = { version = "0.11", default-features = false, features = ["defmt", "time-driver-rtc1", "gpiote", "unstable-pac", "rt", "nrf52840"] }
+embassy-futures = "0.1.1"
+embassy-sync = { version = "0.8", features = ["defmt"] }
+
+futures = { version = "0.3", default-features = false, features = ["async-await"]}
+nrf-sdc = { version = "0.4", default-features = false, features = ["defmt", "peripheral", "central", "nrf52840"] }
+nrf-mpsl = { version = "0.3", default-features = false, features = ["defmt", "critical-section-impl"] }
+bt-hci = { version = "0.9", default-features = false, features = ["defmt"] }
+trouble-host = { version = "0.7.0", features = ["derive", "scan", "gatt", "defmt", "peripheral"] }
+
+defmt = "1.0"
+defmt-rtt = "1.0"
+panic-probe = { version = "1.0", features = ["print-defmt"] }
+
+cortex-m = { version = "0.7.6" }
+cortex-m-rt = "0.7.0"
+static_cell = "2"
+
+[profile.release]
+debug = 2
+
+[patch.crates-io]
+# Taken from https://github.com/embassy-rs/trouble/blob/main/examples/nrf52/Cargo.toml
+nrf-sdc = { git = "https://github.com/alexmoon/nrf-sdc.git", rev = "abe49d22ebfc85fae134eb082fbfddf752016a55"}
+nrf-mpsl = { git = "https://github.com/alexmoon/nrf-sdc.git", rev = "abe49d22ebfc85fae134eb082fbfddf752016a55"}

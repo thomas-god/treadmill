@@ -95,7 +95,6 @@ async fn main(spawner: Spawner) {
 use embassy_futures::join::join;
 use embassy_futures::select::select;
 use embassy_time::{Duration, Timer};
-use trouble_host::prelude::*;
 
 /// Max number of connections
 const CONNECTIONS_MAX: usize = 1;
@@ -151,11 +150,7 @@ where
         seen: RefCell::new(Deque::new()),
     };
     let mut scanner = Scanner::new(central);
-    let mut config = ScanConfig::default();
-    config.active = true;
-    config.phys = PhySet::M1;
-    config.interval = Duration::from_secs(1);
-    config.window = Duration::from_secs(1);
+    let config = ScanConfig::default();
 
     let _ = join(runner.run_with_handler(&printer), async {
         join(
@@ -177,7 +172,7 @@ where
             },
             // Scanning task
             async {
-                let mut session = scanner.scan(&config).await.unwrap();
+                let mut _session = scanner.scan(&config).await.unwrap();
 
                 loop {
                     Timer::after(Duration::from_secs(1)).await;
@@ -203,30 +198,6 @@ impl EventHandler for Printer {
                 }
                 seen.push_back(report.addr).unwrap();
             }
-        }
-    }
-}
-
-/// This is a background task that is required to run forever alongside any other BLE tasks.
-///
-/// ## Alternative
-///
-/// If you didn't require this to be generic for your application, you could statically spawn this with i.e.
-///
-/// ```rust,ignore
-///
-/// #[embassy_executor::task]
-/// async fn ble_task(mut runner: Runner<'static, SoftdeviceController<'static>>) {
-///     runner.run().await;
-/// }
-///
-/// spawner.must_spawn(ble_task(runner));
-/// ```
-async fn ble_task<C: Controller, P: PacketPool>(mut runner: Runner<'_, C, P>) {
-    loop {
-        if let Err(e) = runner.run().await {
-            let e = defmt::Debug2Format(&e);
-            panic!("[ble_task] error: {:?}", e);
         }
     }
 }

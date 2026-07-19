@@ -14,7 +14,7 @@ use std::io::Write;
 use std::path::PathBuf;
 
 fn linker_data() -> &'static [u8] {
-    return include_bytes!("memory-nrf52840.x");
+    include_bytes!("memory-nrf52840.x")
 }
 
 fn main() {

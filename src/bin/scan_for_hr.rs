@@ -3,16 +3,17 @@
 
 use core::cell::RefCell;
 
-use async_ringbuf::{AsyncStaticRb, traits::*};
 use bt_hci::cmd::le::LeSetScanParams;
 use bt_hci::controller::ControllerCmdSync;
-use defmt::{info, unwrap, warn};
+use defmt::{error, info, unwrap, warn};
 use embassy_executor::Spawner;
 use embassy_futures::join::join;
 use embassy_futures::select::select;
 use embassy_nrf::mode::Async;
 use embassy_nrf::peripherals::RNG;
 use embassy_nrf::{bind_interrupts, rng};
+use embassy_sync::blocking_mutex::raw::NoopRawMutex;
+use embassy_sync::pubsub::{DynImmediatePublisher, DynSubscriber, PubSubChannel};
 use embassy_time::{Duration, Timer};
 use heapless::Deque;
 use nrf_sdc::mpsl::MultiprotocolServiceLayer;
@@ -117,136 +118,44 @@ where
     let stack = trouble_host::new(controller, &mut resources)
         .set_random_address(address)
         .build();
-    let runner = stack.runner();
-    let mut peripheral = stack.peripheral();
-
-    const RB_SIZE: usize = 1;
-    let mut rb = AsyncStaticRb::<u8, RB_SIZE>::default();
-    let (mut prod, mut cons) = rb.split_ref();
-
-    let printer = Printer {
+    let mut runner = stack.runner();
+    let handler = HRDeviceScanner {
         seen: RefCell::new(Deque::new()),
-        hr_device: RefCell::new(Deque::new()),
+        hr_devices: RefCell::new(Deque::new()),
     };
 
-    let server = Server::new_with_config(GapConfig::Peripheral(PeripheralConfig {
-        name: "HR resynced",
-        appearance: &appearance::heart_rate_sensor::GENERIC_HEART_RATE_SENSOR,
-    }))
-    .unwrap();
-
-    let _ = join(
-        ble_task(runner, &printer),
-        async {
-            join(
-                async {
-                    // Phase 1: Scan for devices, use scope to drop scanner and free the stack.central()
-                    {
-                        let mut scanner = Scanner::new(stack.central());
-                        let config = ScanConfig::default();
-
-                        let _session = scanner.scan(&config).await.unwrap();
-                        Timer::after(Duration::from_secs(2)).await;
-                    }
-
-                    // Give the controller time to fully stop scanning
-                    Timer::after(Duration::from_millis(100)).await;
-
-                    info!(
-                        "Scan done after 2s, {:?} device(s) found",
-                        printer.hr_device.borrow().len()
-                    );
-
-                    // Phase 2: Connect to devices
-                    let mut central = stack.central();
-                    if let Some((kind, addr)) = printer.hr_device.borrow().iter().next().cloned() {
-                        info!("Connecting to {:?}", addr);
-                        let target = Address::new(kind, addr);
-                        let config = ConnectConfig {
-                            connect_params: Default::default(),
-                            scan_config: ScanConfig {
-                                filter_accept_list: &[target],
-                                ..Default::default()
-                            },
-                        };
-
-                        let conn = central.connect(&config).await.unwrap();
-                        info!("Connected, creating gatt client");
-
-                        let client = GattClient::<C, DefaultPacketPool, 5>::new(&stack, &conn)
-                            .await
-                            .unwrap();
-                        info!("gatt client created");
-
-                        let _ = join(client.task(), async {
-                            let service = client
-                                .services_by_uuid(&Uuid::new_short(service::HEART_RATE.to_u16()))
-                                .await
-                                .unwrap()
-                                .first()
-                                .unwrap()
-                                .clone();
-                            info!("heart rate service found");
-
-                            let c: Characteristic<u8> = client
-                                .characteristic_by_uuid(
-                                    &service,
-                                    &Uuid::new_short(
-                                        characteristic::HEART_RATE_MEASUREMENT.to_u16(),
-                                    ),
-                                )
-                                .await
-                                .unwrap();
-
-                            let mut listener = client.subscribe(&c, false).await.unwrap();
-                            info!("listening to heart rate measurement ... ");
-
-                            loop {
-                                let data = listener.next().await;
-                                let _ = prod.push(data.as_ref()[1]).await;
-                                info!(
-                                    "Got notification: {:?} (val: {})",
-                                    data.as_ref(),
-                                    data.as_ref()[0]
-                                );
-                            }
-                        })
-                        .await;
-                    }
-                },
-                async {
-                    // Delay advertising to ensure scanning completes first
-                    Timer::after(Duration::from_millis(300)).await;
-                    loop {
-                        match advertise("HR resynced", &mut peripheral, &server).await {
-                            Ok(conn) => {
-                                let a = gatt_events_task(&conn);
-                                let b = custom_task(&server, &conn, &mut cons);
-                                select(a, b).await;
-                            }
-                            Err(e) => {
-                                let e = defmt::Debug2Format(&e);
-                                panic!("[adv] error: {:?}", e);
-                            }
-                        }
-                    }
-                },
-            )
-        }
-        .await,
+    // Make sure the BLE stack in running in parallel of main task
+    select(
+        ble_task_by_ref(&mut runner, &handler),
+        main(&stack, &handler),
     )
     .await;
 }
 
-struct Printer {
-    seen: RefCell<Deque<BdAddr, 128>>,
-    hr_device: RefCell<Deque<(AddrKind, BdAddr), 8>>,
+async fn main<C: Controller + ControllerCmdSync<LeSetScanParams>>(
+    stack: &Stack<'_, C, DefaultPacketPool>,
+    handler: &HRDeviceScanner,
+) {
+    let central = stack.central();
+
+    let hr_device = scan_for_hr_device(central, handler).await.unwrap();
+    info!("HR device found, connecting...");
+
+    // Give the controller time to fully stop scanning before connecting and broadcasting
+    Timer::after(Duration::from_millis(1000)).await;
+
+    broadcast_hr_values(stack, hr_device).await;
 }
 
-impl EventHandler for Printer {
+struct HRDeviceScanner {
+    seen: RefCell<Deque<BdAddr, 128>>,
+    hr_devices: RefCell<Deque<(AddrKind, BdAddr), 8>>,
+}
+
+impl EventHandler for HRDeviceScanner {
     fn on_adv_reports(&self, mut it: LeAdvReportsIter<'_>) {
         let mut seen = self.seen.borrow_mut();
-        let mut hr_devices = self.hr_device.borrow_mut();
+        let mut hr_devices = self.hr_devices.borrow_mut();
         while let Some(Ok(report)) = it.next() {
             if seen.iter().find(|b| b.raw() == report.addr.raw()).is_none() {
                 for ad in AdStructure::decode(report.data) {
@@ -276,16 +185,156 @@ impl EventHandler for Printer {
     }
 }
 
-async fn ble_task<C: Controller, P: PacketPool, E: EventHandler>(
-    mut runner: Runner<'_, C, P>,
+async fn ble_task_by_ref<C: Controller, P: PacketPool, E: EventHandler>(
+    runner: &mut Runner<'_, C, P>,
     handler: &E,
 ) {
+    info!("running ble task");
     loop {
         if let Err(e) = runner.run_with_handler(handler).await {
             let e = defmt::Debug2Format(&e);
             panic!("[ble_task] error: {:?}", e);
         }
     }
+}
+
+async fn scan_hr_devices_task<C, P: PacketPool>(
+    central: Central<'_, C, P>,
+    handler: &HRDeviceScanner,
+) -> Result<(AddrKind, BdAddr), ()>
+where
+    C: Controller + ControllerCmdSync<LeSetScanParams>,
+{
+    let mut scanner = Scanner::new(central);
+    let config = ScanConfig::default();
+
+    let _session = scanner.scan(&config).await;
+    Timer::after(Duration::from_secs(2)).await;
+
+    handler.hr_devices.borrow().front().cloned().ok_or(())
+}
+
+async fn scan_for_hr_device<C, P: PacketPool>(
+    central: Central<'_, C, P>,
+    handler: &HRDeviceScanner,
+) -> Result<(AddrKind, BdAddr), ()>
+where
+    C: Controller + ControllerCmdSync<LeSetScanParams>,
+{
+    let res = scan_hr_devices_task(central, handler).await;
+
+    match res {
+        Ok(found_device) => Ok(found_device),
+        Err(err) => {
+            let e = defmt::Debug2Format(&err);
+            error!("[scan hr devices] error: {:?}", e);
+            Err(())
+        }
+    }
+}
+
+async fn connect_to_hr_device<'a, C: Controller>(
+    stack: &Stack<'_, C, DefaultPacketPool>,
+    mut central: Central<'a, C, DefaultPacketPool>,
+    device: (AddrKind, BdAddr),
+) -> GattClient<'a, C, DefaultPacketPool, 5> {
+    let (kind, addr) = device;
+    let target = Address::new(kind, addr);
+    let config = ConnectConfig {
+        connect_params: Default::default(),
+        scan_config: ScanConfig {
+            filter_accept_list: &[target],
+            ..Default::default()
+        },
+    };
+
+    let conn = central.connect(&config).await.unwrap();
+
+    GattClient::<'a, C, DefaultPacketPool, 5>::new(stack, &conn)
+        .await
+        .unwrap()
+}
+
+async fn watch_hr_values_task<C: Controller, P: PacketPool>(
+    client: GattClient<'_, C, P, 5>,
+    publisher: DynImmediatePublisher<'_, u8>,
+) {
+    join(client.task(), async {
+        let service = client
+            .services_by_uuid(&Uuid::new_short(service::HEART_RATE.to_u16()))
+            .await
+            .unwrap()
+            .first()
+            .unwrap()
+            .clone();
+        info!("heart rate service found");
+
+        let characteristic: Characteristic<u8> = client
+            .characteristic_by_uuid(
+                &service,
+                &Uuid::new_short(characteristic::HEART_RATE_MEASUREMENT.to_u16()),
+            )
+            .await
+            .unwrap();
+
+        let mut listener = client.subscribe(&characteristic, false).await.unwrap();
+        info!("listening to heart rate measurement ... ");
+
+        loop {
+            let data = listener.next().await;
+            // TODO: hardcoded [1] ?
+            publisher.publish_immediate(data.as_ref()[1]);
+            info!(
+                "Got notification: {:?} (val: {})",
+                data.as_ref(),
+                data.as_ref()[0]
+            );
+        }
+    })
+    .await;
+}
+
+async fn start_hr_server_task<C: Controller>(
+    mut peripheral: Peripheral<'_, C, DefaultPacketPool>,
+    mut subscriber: DynSubscriber<'_, u8>,
+) {
+    let server = Server::new_with_config(GapConfig::Peripheral(PeripheralConfig {
+        name: "HR resynced",
+        appearance: &appearance::heart_rate_sensor::GENERIC_HEART_RATE_SENSOR,
+    }))
+    .unwrap();
+    loop {
+        match advertise("HR resynced", &mut peripheral, &server).await {
+            Ok(conn) => {
+                let a = gatt_events_task(&conn);
+                let b = notify_hr_values_task(&server, &conn, &mut subscriber);
+                select(a, b).await;
+            }
+            Err(e) => {
+                let e = defmt::Debug2Format(&e);
+                panic!("[adv] error: {:?}", e);
+            }
+        }
+    }
+}
+
+async fn broadcast_hr_values<C: Controller>(
+    stack: &Stack<'_, C, DefaultPacketPool>,
+    device: (AddrKind, BdAddr),
+) {
+    let peripheral = stack.peripheral();
+    let central = stack.central();
+    let client = connect_to_hr_device(stack, central, device).await;
+
+    let hr_channel = PubSubChannel::<NoopRawMutex, u8, 4, 4, 4>::new();
+    let hr_publisher = hr_channel.dyn_immediate_publisher();
+    let hr_subscriber = hr_channel.dyn_subscriber().unwrap();
+
+    select(
+        watch_hr_values_task(client, hr_publisher),
+        start_hr_server_task(peripheral, hr_subscriber),
+    )
+    .await;
 }
 
 // GATT Server definition
@@ -355,23 +404,18 @@ async fn gatt_events_task<P: PacketPool>(conn: &GattConnection<'_, '_, P>) -> Re
     Ok(())
 }
 
-/// Example task to use the BLE notifier interface.
-/// This task will notify the connected central of a counter value every 2 seconds.
-/// It will also read the RSSI value every 2 seconds.
-/// and will stop when the connection is closed by the central or an error occurs.
-async fn custom_task<P: PacketPool, T: AsyncConsumer<Item = u8>>(
+async fn notify_hr_values_task<P: PacketPool>(
     server: &Server<'_>,
     conn: &GattConnection<'_, '_, P>,
-    consumer: &mut T,
+    subscriber: &mut DynSubscriber<'_, u8>,
 ) {
     let hr = server.hr_service.value;
     loop {
-        if let Some(val) = consumer.pop().await {
-            info!("[custom_task] new hr value {}", val);
-            if hr.notify(conn, &val, true).await.is_err() {
-                info!("[custom_task] error notifying connection");
-                break;
-            };
-        }
+        let val = subscriber.next_message_pure().await;
+        info!("[custom_task] new hr value {}", val);
+        if hr.notify(conn, &val, true).await.is_err() {
+            info!("[custom_task] error notifying connection");
+            break;
+        };
     }
 }

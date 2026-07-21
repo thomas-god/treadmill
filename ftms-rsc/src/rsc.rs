@@ -1,6 +1,6 @@
 use crate::ftms::TreadmillData;
 
-#[derive(Clone, defmt::Format)]
+#[derive(Clone)]
 pub struct RscMeasurement {
     pub speed_mps: f32,
     pub cadence_rpm: u8,
@@ -50,6 +50,11 @@ pub fn encode_rsc_measurement(m: &RscMeasurement) -> [u8; 8] {
     buf
 }
 
+pub const fn encode_rsc_feature() -> [u8; 2] {
+    let flags: u16 = (1 << 1) | (1 << 2); // Total Distance + Walking/Running Status
+    flags.to_le_bytes()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -62,7 +67,7 @@ mod tests {
         };
         let rsc = to_rsc_measurement(&treadmill).unwrap();
         let bytes = encode_rsc_measurement(&rsc);
-        assert_eq!(bytes.len(), 4);
+        assert_eq!(bytes.len(), 8);
         assert_eq!(bytes[0], 0b0000_0100);
     }
 

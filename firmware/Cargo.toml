@@ -3,6 +3,8 @@ name = "treadmill"
 version = "0.1.0"
 edition = "2024"
 
+[workspace]
+
 [dependencies]
 embassy-executor = { version = "0.10", default-features = false, features = ["platform-cortex-m", "executor-thread", "defmt", "executor-interrupt"] }
 embassy-time = { version = "0.5", default-features = false, features = ["defmt", "defmt-timestamp-uptime"] }
@@ -25,6 +27,8 @@ panic-probe = { version = "1.0", features = ["print-defmt"] }
 cortex-m = { version = "0.7.6" }
 cortex-m-rt = "0.7.0"
 static_cell = "2"
+
+ftms-rsc = { path = "../ftms-rsc" }
 
 [profile.release]
 debug = 2

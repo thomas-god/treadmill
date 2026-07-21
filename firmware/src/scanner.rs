@@ -2,7 +2,7 @@ use bt_hci::cmd::le::LeSetScanParams;
 use bt_hci::controller::ControllerCmdSync;
 use bt_hci::param::{AddrKind, BdAddr};
 use core::cell::RefCell;
-use defmt::{error, info, warn};
+use defmt::{info, warn};
 use embassy_time::{Duration, Timer};
 use heapless::Deque;
 use trouble_host::prelude::*;
@@ -23,16 +23,7 @@ where
     // Explicit timer as ScanConfig::timeout does not seem to work properly from testing
     Timer::after(Duration::from_secs(2)).await;
 
-    let res = handler.ftms_devices.borrow().front().cloned().ok_or(());
-
-    match res {
-        Ok(found_device) => Ok(found_device),
-        Err(err) => {
-            let e = defmt::Debug2Format(&err);
-            error!("[scan hr devices] error: {:?}", e);
-            Err(())
-        }
-    }
+    handler.ftms_devices.borrow().front().cloned().ok_or(())
 }
 
 pub struct FTMSDeviceScanner {

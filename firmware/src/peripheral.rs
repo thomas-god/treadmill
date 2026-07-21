@@ -3,7 +3,7 @@ use embassy_futures::select::select;
 use embassy_sync::pubsub::DynSubscriber;
 use trouble_host::prelude::*;
 
-use crate::rsc::{RscMeasurement, encode_rsc_measurement};
+use ftms_rsc::{RscMeasurement, encode_rsc_measurement};
 
 #[gatt_server]
 struct Server {
@@ -15,12 +15,8 @@ struct RSCService {
     #[characteristic(uuid = characteristic::RSC_MEASUREMENT, read, notify)]
     measurement: [u8; 8],
 
-    #[characteristic(uuid = characteristic::RSC_FEATURE, read, value = encode_rsc_feature())]
+    #[characteristic(uuid = characteristic::RSC_FEATURE, read, value = ftms_rsc::encode_rsc_feature())]
     feature: [u8; 2],
-}
-pub const fn encode_rsc_feature() -> [u8; 2] {
-    let flags: u16 = (1 << 1) | (1 << 2); // Total Distance + Walking/Running Status
-    flags.to_le_bytes()
 }
 
 pub async fn start_rsc_server<C: Controller>(

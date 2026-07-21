@@ -1,11 +1,10 @@
-use defmt::{debug, info, warn};
+use defmt::{info, warn};
 use embassy_futures::join::join;
 use embassy_sync::pubsub::DynImmediatePublisher;
 use trouble_host::prelude::*;
 use trouble_host::{Stack, central::Central};
 
-use crate::rsc::RscMeasurement;
-use crate::{ftms, rsc};
+use ftms_rsc::RscMeasurement;
 
 pub async fn watch_treadmill_data<C: Controller>(
     stack: &Stack<'_, C, DefaultPacketPool>,
@@ -38,21 +37,20 @@ pub async fn watch_treadmill_data<C: Controller>(
 
         loop {
             let data = listener.next().await;
-            let treadmill_data = match ftms::parse_treadmill_data(data.as_ref()) {
+            let treadmill_data = match ftms_rsc::parse_treadmill_data(data.as_ref()) {
                 Ok(data) => data,
                 Err(err) => {
                     warn!("Unable to parse treadmill data: {:?}", err);
                     continue;
                 }
             };
-            let rsc_data = match rsc::to_rsc_measurement(&treadmill_data) {
+            let rsc_data = match ftms_rsc::to_rsc_measurement(&treadmill_data) {
                 Some(data) => data,
                 None => {
                     warn!("Unable to convert treadmill data in RSC measurement");
                     continue;
                 }
             };
-            debug!("RSC measurement: {:?}", &rsc_data);
             publisher.publish_immediate(rsc_data);
         }
     })

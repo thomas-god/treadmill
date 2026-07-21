@@ -1,7 +1,6 @@
 #![no_std]
 #![no_main]
 
-use crate::rsc::RscMeasurement;
 use bt_hci::cmd::le::LeSetScanParams;
 use bt_hci::controller::ControllerCmdSync;
 use defmt::{info, unwrap};
@@ -18,12 +17,12 @@ use nrf_sdc::{self as sdc, mpsl};
 use static_cell::StaticCell;
 use trouble_host::prelude::*;
 
+use ftms_rsc::RscMeasurement;
+
 use {defmt_rtt as _, panic_probe as _};
 
 pub mod central;
-pub mod ftms;
 pub mod peripheral;
-pub mod rsc;
 pub mod scanner;
 
 bind_interrupts!(struct Irqs {
@@ -138,16 +137,15 @@ async fn main<C: Controller + ControllerCmdSync<LeSetScanParams>>(
     handler: &scanner::FTMSDeviceScanner,
 ) {
     // Scan for FTMS-compatible devices
-    let central = stack.central();
-    let device = match scanner::scan_for_ftms_device(central, handler).await {
-        Ok(device) => device,
-        Err(_err) => {
-            panic!("Error while scanning for FTMS-compatible devices")
-        }
-        _ => unreachable!(),
+    let device = loop {
+        let central = stack.central();
+        if let Ok(device) = scanner::scan_for_ftms_device(central, handler).await {
+            break device;
+        };
+        info!("No FTMS-compatible devices found, rescanning...")
     };
 
-    info!("HR device found, connecting...");
+    info!("FTMS-compatible device found, connecting...");
     // Give the controller time to fully stop scanning before connecting and broadcasting
     Timer::after(Duration::from_millis(1000)).await;
 

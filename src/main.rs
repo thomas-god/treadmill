@@ -1,21 +1,30 @@
 #![no_std]
 #![no_main]
 
-use core::cell::RefCell;
-
+use crate::rsc::RscMeasurement;
 use bt_hci::cmd::le::LeSetScanParams;
 use bt_hci::controller::ControllerCmdSync;
-use defmt::{info, unwrap, warn};
+use defmt::{info, unwrap};
 use embassy_executor::Spawner;
+use embassy_futures::select::select;
 use embassy_nrf::mode::Async;
 use embassy_nrf::peripherals::RNG;
 use embassy_nrf::{bind_interrupts, rng};
-use heapless::Deque;
+use embassy_sync::blocking_mutex::raw::NoopRawMutex;
+use embassy_sync::pubsub::PubSubChannel;
+use embassy_time::{Duration, Timer};
 use nrf_sdc::mpsl::MultiprotocolServiceLayer;
 use nrf_sdc::{self as sdc, mpsl};
 use static_cell::StaticCell;
 use trouble_host::prelude::*;
+
 use {defmt_rtt as _, panic_probe as _};
+
+pub mod central;
+pub mod ftms;
+pub mod peripheral;
+pub mod rsc;
+pub mod scanner;
 
 bind_interrupts!(struct Irqs {
     RNG => rng::InterruptHandler<RNG>;
@@ -36,6 +45,12 @@ const L2CAP_TXQ: u8 = 3;
 
 /// How many incoming L2CAP buffers per link
 const L2CAP_RXQ: u8 = 3;
+
+/// Max number of connections
+const CONNECTIONS_MAX: usize = 3;
+
+/// Max number of L2CAP channels.
+const L2CAP_CHANNELS_MAX: usize = 4; // Signal + att
 
 fn build_sdc<'d, const N: usize>(
     p: nrf_sdc::Peripherals<'d>,
@@ -85,39 +100,11 @@ async fn main(spawner: Spawner) {
         p.PPI_CH25, p.PPI_CH26, p.PPI_CH27, p.PPI_CH28, p.PPI_CH29,
     );
     let mut rng = rng::Rng::new(p.RNG, Irqs);
-    let mut sdc_mem = sdc::Mem::<6080>::new();
+    let mut sdc_mem = sdc::Mem::<12080>::new();
     let sdc = unwrap!(build_sdc(sdc_p, &mut rng, mpsl, &mut sdc_mem));
 
     // 3. Run application
     run(sdc).await;
-}
-
-use embassy_futures::join::join;
-use embassy_futures::select::select;
-use embassy_time::{Duration, Timer};
-
-/// Max number of connections
-const CONNECTIONS_MAX: usize = 1;
-
-/// Max number of L2CAP channels.
-const L2CAP_CHANNELS_MAX: usize = 2; // Signal + att
-
-// GATT Server definition
-#[gatt_server]
-struct Server {
-    battery_service: BatteryService,
-}
-
-/// Battery service
-#[gatt_service(uuid = service::BATTERY)]
-struct BatteryService {
-    /// Battery Level
-    #[descriptor(uuid = descriptors::VALID_RANGE, read, value = [0, 100])]
-    #[descriptor(uuid = descriptors::MEASUREMENT_DESCRIPTION, name = "hello", read, value = "Battery Level", type = &'static str)]
-    #[characteristic(uuid = characteristic::BATTERY_LEVEL, read, notify, value = 10)]
-    level: u8,
-    #[characteristic(uuid = "408813df-5dd4-1f87-ec11-cdb001100000", write, read, notify)]
-    status: (),
 }
 
 /// Run the BLE stack.
@@ -136,197 +123,58 @@ where
         .set_random_address(address)
         .build();
     let mut runner = stack.runner();
-    let mut peripheral = stack.peripheral();
-    let central = stack.central();
 
-    info!("Starting advertising and GATT service");
-    let server = Server::new_with_config(GapConfig::Peripheral(PeripheralConfig {
-        name: "TrouBLE",
-        appearance: &appearance::power_device::GENERIC_POWER_DEVICE,
-    }))
-    .unwrap();
+    let handler = scanner::FTMSDeviceScanner::new();
 
-    let printer = Printer {
-        seen: RefCell::new(Deque::new()),
-    };
-    let mut scanner = Scanner::new(central);
-    let config = ScanConfig::default();
-
-    let _ = join(runner.run_with_handler(&printer), async {
-        join(
-            // Peripheral/advertising task
-            async {
-                loop {
-                    match advertise("Trouble Example", &mut peripheral, &server).await {
-                        Ok(conn) => {
-                            let a = gatt_events_task(&server, &conn);
-                            let b = custom_task(&server, &conn, &stack);
-                            select(a, b).await;
-                        }
-                        Err(e) => {
-                            let e = defmt::Debug2Format(&e);
-                            panic!("[adv] error: {:?}", e);
-                        }
-                    }
-                }
-            },
-            // Scanning task
-            async {
-                let mut _session = scanner.scan(&config).await.unwrap();
-
-                loop {
-                    Timer::after(Duration::from_secs(1)).await;
-                }
-            },
-        )
-        .await
-    })
+    // Make sure the BLE stack in running in parallel of main task
+    select(
+        ble_task_by_ref(&mut runner, &handler),
+        main(&stack, &handler),
+    )
     .await;
 }
-struct Printer {
-    seen: RefCell<Deque<BdAddr, 128>>,
-}
-
-impl EventHandler for Printer {
-    fn on_adv_reports(&self, mut it: LeAdvReportsIter<'_>) {
-        let mut seen = self.seen.borrow_mut();
-        while let Some(Ok(report)) = it.next() {
-            if seen.iter().find(|b| b.raw() == report.addr.raw()).is_none() {
-                info!("discovered: {:?}", report.addr);
-                if seen.is_full() {
-                    seen.pop_front();
-                }
-                seen.push_back(report.addr).unwrap();
-            }
-        }
-    }
-}
-
-/// Stream Events until the connection closes.
-///
-/// This function will handle the GATT events and process them.
-/// This is how we interact with read and write requests.
-async fn gatt_events_task<P: PacketPool>(
-    server: &Server<'_>,
-    conn: &GattConnection<'_, '_, P>,
-) -> Result<(), Error> {
-    let level = server.battery_service.level;
-    let status_handle = server.battery_service.status.handle;
-    let mut status = false;
-    let reason = loop {
-        match conn.next().await {
-            GattConnectionEvent::Disconnected { reason } => break reason,
-            GattConnectionEvent::Gatt { event } => {
-                let reply = match event {
-                    GattEvent::Read(event) => {
-                        if event.handle() == level.handle {
-                            let value = conn.get(&level);
-                            info!("[gatt] Read Event to Level Characteristic: {:?}", value);
-                            event.accept()
-                        } else if event.handle() == status_handle {
-                            event.accept_unprocessed(&status)
-                        } else {
-                            event.accept()
-                        }
-                    }
-                    GattEvent::Write(event) => {
-                        if event.handle() == level.handle {
-                            event.with_data(|offset, data| {
-                                info!(
-                                    "[gatt] Write Event to Level Characteristic at {}: {:?}",
-                                    offset, data
-                                )
-                            });
-                            event.accept()
-                        } else if event.handle() == status_handle {
-                            match event.validate(1, 1) {
-                                Ok(()) => {
-                                    event.with_data(|offset, data| {
-                                        if data.len() == 1 {
-                                            // If data.len() is 1, offset must be 0 or else validate would have errored
-                                            assert!(offset == 0);
-                                            status = data[0] != 0;
-                                        }
-                                    });
-                                    event.accept_unprocessed()
-                                }
-                                Err(err) => event.reject(err),
-                            }
-                        } else {
-                            event.accept()
-                        }
-                    }
-                    _ => event.accept(),
-                };
-                // This step is also performed at drop(), but writing it explicitly is necessary
-                // in order to ensure reply is sent.
-                match reply {
-                    Ok(reply) => reply.send().await,
-                    Err(e) => warn!("[gatt] error sending response: {:?}", e),
-                };
-            }
-            _ => {} // ignore other Gatt Connection Events
-        }
-    };
-    info!("[gatt] disconnected: {:?}", reason);
-    Ok(())
-}
-
-/// Create an advertiser to use to connect to a BLE Central, and wait for it to connect.
-async fn advertise<'values, 'server, C: Controller>(
-    name: &'values str,
-    peripheral: &mut Peripheral<'values, C, DefaultPacketPool>,
-    server: &'server Server<'values>,
-) -> Result<GattConnection<'values, 'server, DefaultPacketPool>, BleHostError<C::Error>> {
-    let mut advertiser_data = [0; 31];
-    let len = AdStructure::encode_slice(
-        &[
-            AdStructure::Flags(LE_GENERAL_DISCOVERABLE | BR_EDR_NOT_SUPPORTED),
-            AdStructure::IncompleteServiceUuids16(&[[0x0f, 0x18]]),
-            AdStructure::CompleteLocalName(name.as_bytes()),
-        ],
-        &mut advertiser_data[..],
-    )?;
-    let advertiser = peripheral
-        .advertise(
-            &Default::default(),
-            Advertisement::ConnectableScannableUndirected {
-                adv_data: &advertiser_data[..len],
-                scan_data: &[],
-            },
-        )
-        .await?;
-    info!("[adv] advertising");
-    let conn = advertiser.accept().await?.with_attribute_server(server)?;
-    info!("[adv] connection established");
-    Ok(conn)
-}
-
-/// Example task to use the BLE notifier interface.
-/// This task will notify the connected central of a counter value every 2 seconds.
-/// It will also read the RSSI value every 2 seconds.
-/// and will stop when the connection is closed by the central or an error occurs.
-async fn custom_task<C: Controller, P: PacketPool>(
-    server: &Server<'_>,
-    conn: &GattConnection<'_, '_, P>,
-    stack: &Stack<'_, C, P>,
+async fn main<C: Controller + ControllerCmdSync<LeSetScanParams>>(
+    stack: &Stack<'_, C, DefaultPacketPool>,
+    handler: &scanner::FTMSDeviceScanner,
 ) {
-    let mut tick: u8 = 0;
-    let level = server.battery_service.level;
+    // Scan for FTMS-compatible devices
+    let central = stack.central();
+    let device = match scanner::scan_for_ftms_device(central, handler).await {
+        Ok(device) => device,
+        Err(_err) => {
+            panic!("Error while scanning for FTMS-compatible devices")
+        }
+        _ => unreachable!(),
+    };
+
+    info!("HR device found, connecting...");
+    // Give the controller time to fully stop scanning before connecting and broadcasting
+    Timer::after(Duration::from_millis(1000)).await;
+
+    // Start converting treadmill data and broadcasting RSC measurements
+    let peripheral = stack.peripheral();
+    let channel = PubSubChannel::<NoopRawMutex, RscMeasurement, 4, 4, 4>::new();
+    let publisher = channel.dyn_immediate_publisher();
+    let subscriber = channel
+        .dyn_subscriber()
+        .expect("Unable to create RSC measurement subscriber");
+
+    select(
+        central::watch_treadmill_data(stack, device, publisher),
+        peripheral::start_rsc_server(peripheral, subscriber),
+    )
+    .await;
+}
+
+async fn ble_task_by_ref<C: Controller, P: PacketPool, E: EventHandler>(
+    runner: &mut Runner<'_, C, P>,
+    handler: &E,
+) {
+    info!("running ble task");
     loop {
-        tick = tick.wrapping_add(1);
-        info!("[custom_task] notifying connection of tick {}", tick);
-        if level.notify(conn, &tick, true).await.is_err() {
-            info!("[custom_task] error notifying connection");
-            break;
-        };
-        // read RSSI (Received Signal Strength Indicator) of the connection.
-        if let Ok(rssi) = conn.raw().rssi(stack).await {
-            info!("[custom_task] RSSI: {:?}", rssi);
-        } else {
-            info!("[custom_task] error getting RSSI");
-            break;
-        };
-        Timer::after_secs(2).await;
+        if let Err(e) = runner.run_with_handler(handler).await {
+            let e = defmt::Debug2Format(&e);
+            panic!("[ble_task] error: {:?}", e);
+        }
     }
 }

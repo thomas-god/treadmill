@@ -140,7 +140,7 @@ abstraction).
 - `firmware` contains the hardware dependant logic and is dependant on
   `ftms-rsc`.
 - _Note that we don't use cargo workspace for these two crates to allow
-  different target and`dependencies per crate (in fact `ftms-rsc` has no
+  different target and dependencies per crate (in fact `ftms-rsc` has no
   dependencies)._
 
 Testing:

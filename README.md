@@ -115,5 +115,53 @@ recognize as a running pod.
   - the placeholder cadence value,
   - the device name or Bluetooth address to connect to (to handle multiple
     FTMS-compatible devices in the same range/room),
-  - name of the virtual running pod.
+  - name and BLE address of the virtual running pod.
 - Loop mode: go back to scanning for FTMS devices when connection ends/fails.
+- Simple desktop CLI to emulate the virtual running pod to easily test one's
+  watch compatibility.
+
+## Development
+
+Same prerequisites and installation, but use `cargo run` instead of
+`cargo flash` to use the debug mode of `probe-rs` to get the board's logs to
+your development machine.
+
+### Design decisions
+
+Since the project scope is small (FTMS to RSC translation) and fixed (the
+protocols are fixed and won't evolve) we chose not to use a full blown
+domain/infrastructure separation as it would add more complexity via indirection
+layers without the usual benefits (evolvability, infrastructure/hardware
+abstraction).
+
+- `fmts-rsc` contains the hardware agnostic logic (parsing and encoding
+  from/into array of bytes, protocol conversion) and lives in a dedicated crate
+  to facilitate testing (`test` needs `std` while the rest is `no_std`),
+- `firmware` contains the hardware dependant logic and is dependant on
+  `ftms-rsc`.
+- _Note that we don't use cargo workspace for these two crates to allow
+  different target and`dependencies per crate (in fact `ftms-rsc` has no
+  dependencies)._
+
+Testing:
+
+```bash
+cd ftms-rsc
+cargo test
+```
+
+Flashing and running the board in debug/development mode
+
+```bash
+cd firmware
+cargo run
+```
+
+### Broad architecture
+
+The board will first enters scanning mode and will wait for any FTMS-compatible
+treadmill. It will then connect to the first device found and check for the
+actual FTMS service and Treadmill Data characteristic. Then a Central (connected
+to the treadmill) and a Peripheral (exposing an RSC service and notifying RSC
+measurements) will run in parallel, communicating via an
+`embassy_sync::pubsub::PubSubChannel`.

@@ -125,8 +125,6 @@ recognize as a running pod.
     FTMS-compatible devices in the same range/room),
   - name and BLE address of the virtual running pod.
 - Loop mode: go back to scanning for FTMS devices when connection ends/fails.
-- Simple desktop CLI to emulate the virtual running pod to easily test one's
-  watch compatibility.
 
 ## Development
 

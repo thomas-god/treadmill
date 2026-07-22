@@ -35,6 +35,14 @@ act as the bridge between the treadmill and sport watches.
 - Watch compatibility: varies by manufacturer, refer to their technical
   specifications as its harder to test without an actual running pod. Be careful
   that ANT+ only compatibility will not work.
+  - You can use our RSC emulator located in `utils/bin/rsc_server.rs` to check
+    how your watch would interact with the data of the virtual running pod :
+    ```bash
+    cd utils
+    cargo run --bin rsc_server
+    ```
+    Works on Linux/MacOS/Windows. Depending on the platform the name and service
+    might not display correctly but you should be able to connect to it anyway.
 
 ### Prerequisites
 
@@ -165,3 +173,10 @@ actual FTMS service and Treadmill Data characteristic. Then a Central (connected
 to the treadmill) and a Peripheral (exposing an RSC service and notifying RSC
 measurements) will run in parallel, communicating via an
 `embassy_sync::pubsub::PubSubChannel`.
+
+You can use our FTMS emulator for easier debugging:
+
+```bash
+cd utils
+cargo run --bin ftms_server
+```

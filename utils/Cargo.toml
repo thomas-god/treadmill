@@ -1,0 +1,10 @@
+[package]
+name = "utils"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+ble-peripheral-rust = "0.2"
+tokio = { version = "1.40", features = ["full"] }
+uuid = "1.10"
+futures = "0.3"

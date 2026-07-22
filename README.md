@@ -1,26 +1,28 @@
 # `treadmill`
 
-nrf52840-based bridge to transform your Fitness Machine Service (FTMS)
-compatible Bluetooth treadmill into a virtual running pod (using Bluetooth
-Running Speed and Cadence Service) compatible with sport watches.
+Transform your Bluetooth treadmill into a virtual running pod using an
+nRF52840-based board as a bridge. This allows your sport watch to get the
+treadmill's speed and distance data during an indoor training session.
 
 ### Motivation and architecture
 
-Recent treadmills expose their data via the Bluetooth
-[Fitness Machine Service](https://www.bluetooth.com/specifications/specs/fitness-machine-service-1-0/)
+Modern treadmills expose their data via the Bluetooth
+[Fitness Machine Service (FTMS)](https://www.bluetooth.com/specifications/specs/fitness-machine-service-1-0/)
 to connect to applications like Zwift and Kinomap. But most sport watches are
-not compatible with that service and cannot use the treadmill data during an
-indoor session. You either have to use the watch inaccurate speed and distance
+not compatible with that service and cannot use treadmill data during an indoor
+session. You either have to use the watch inaccurate speed and distance
 estimations, or manually set the speed on your watch which can become clunky.
 
-On the other hand the support for the
+On the other hand sport watches support for the Bluetooth
 [Running Speed and Cadence Service (RSC)](https://www.bluetooth.com/specifications/specs/running-speed-and-cadence-service-1-0/)
-seems to be more widespread. While RSC is simpler than FTMS, it's enough to get
-the treadmill's speed and distance data to your watch and have comparable data
-from session to session.
+seems to be more widespread. While RSC is simpler than FTMS in term of features
+and data supported, it's enough to get the treadmill's speed and distance to
+your watch and have comparable training data from session to session.
 
-This project uses an nrf52840 micro-controller as the bridge between the
-treadmill and your watch as an always-on and low-power solution.
+To provide an _always-on_ (anyone in your household can connect to it without an
+additional external application) and _cheap_ (board cost and low power
+consumption) solution, this project is based on an nrf52840 micro-controller to
+act as the bridge between the treadmill and sport watches.
 
 ### Compatibility
 
@@ -31,7 +33,8 @@ treadmill and your watch as an always-on and low-power solution.
   mention of 'Fitness Machine' or 'FTMS'.
 
 - Watch compatibility: varies by manufacturer, refer to their technical
-  specifications as its harder to test without a running pod.
+  specifications as its harder to test without an actual running pod. Be careful
+  that ANT+ only compatibility will not work.
 
 ### Prerequisites
 
@@ -43,27 +46,74 @@ treadmill and your watch as an always-on and low-power solution.
 
 ### Installation
 
-1- Install the target toolchain
+1. Install the target toolchain
 
 ```bash
 rustup target add thumbv7em-none-eabihf
 ```
 
-2- Erase the chip and flash the SoftDevice (adjust your SoftDevice version)
+2. Erase the chip and flash the SoftDevice (adjust your SoftDevice version
+   accordingly)
 
 ```bash
 probe-rs erase --chip nrf52840_xxAA
+```
+
+```bash
 probe-rs download --verify --binary-format hex --chip nRF52840_xxAA s140_nrf52_7.X.X_softdevice.hex
 ```
 
-3- Clone the repository and flash the board
+3. Clone the repository and flash the board
 
 ```bash
 git clone git@github.com:thomas-god/treadmill.git
-cd treadmill
+cd treadmill/firmware
 cargo flash --release --chip nRF52840_xxAA
 ```
 
 Your board will now scan for FTMS-compatible devices, connect to first one and
 appear as a Bluetooth device named `RSC service` that your watch should
 recognize as a running pod.
+
+### Limitations
+
+- **No control of the treadmill from the watch**: since RSC is a read-only
+  service, you cannot control your treadmill's speed and inclination from the
+  watch as you would do from Zwift or when using a bike home trainer. Physical
+  control of the treadmill remains possible when connected to it.
+
+- **Fixed cadence**: the RSC expects a cadence value when receiving data from a
+  running pod. Since treadmills cannot measure cadence the bridge returns a
+  constant placeholder value instead. From our testing sport watches will
+  prioritize the speed information when computing other training metrics, but
+  your mileage may vary depending on the watch.
+
+- **No inclination or heart rate data**: RSC does not have a notion of
+  inclination or heart rate so that:
+  - recorded data on your watch will be flat,
+  - if you usually connect a hear rate sensor to the treadmill, connect it
+    directly to your watch instead.
+
+### Tested devices
+
+#### Boards
+
+- [Seeed Studio XIAO nRF52840](https://www.seeedstudio.com/Seeed-XIAO-BLE-nRF52840-p-5201.html)
+
+#### Treadmills
+
+- Domyos RUN500
+
+#### Sport watches
+
+- Coros APEX Pro 2
+- Garmin Instinct Solar 2
+
+### Future features
+
+- Compile time variables to control:
+  - the placeholder cadence value,
+  - the device name or Bluetooth address to connect to (to handle multiple
+    FTMS-compatible devices in the same range/room),
+  - name of the virtual running pod.
+- Loop mode: go back to scanning for FTMS devices when connection ends/fails.

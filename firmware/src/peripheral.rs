@@ -39,6 +39,8 @@ pub async fn start_rsc_server<C: Controller>(
                 let e = defmt::Debug2Format(&e);
                 panic!("[adv] error: {:?}", e);
             }
+            // Otherwise rust-analyzer returns a false positive claiming arm '_' is not covered.
+            #[allow(unreachable_patterns)]
             _ => unreachable!(),
         }
     }
